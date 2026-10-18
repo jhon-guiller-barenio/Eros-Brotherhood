@@ -1,0 +1,24 @@
+import {createClerkClient} from '@clerk/backend';
+import {neon} from '@neondatabase/serverless';
+export default async function handler(req,res){
+res.setHeader('Cache-Control','no-store');
+const action=req.query.action;const fail=(code,error)=>res.status(code).json({error});
+if(action==='config')return res.json({publishableKey:process.env.CLERK_PUBLISHABLE_KEY||null});
+if(!process.env.CLERK_SECRET_KEY||!process.env.CLERK_PUBLISHABLE_KEY||!process.env.DATABASE_URL)return fail(503,'Member services are awaiting configuration.');
+try{
+const sql=neon(process.env.DATABASE_URL);
+if(action==='activities'&&req.method==='GET'){const activities=await sql`SELECT * FROM activities ORDER BY starts_at`;return res.json({activities})}
+const clerk=createClerkClient({secretKey:process.env.CLERK_SECRET_KEY,publishableKey:process.env.CLERK_PUBLISHABLE_KEY});
+const origin=process.env.APP_URL;if(!origin)return fail(503,'The application origin has not been configured.');
+const url=new URL(req.url,origin);const request=new Request(url,{method:req.method,headers:new Headers(Object.entries(req.headers).filter(([,v])=>v!=null).map(([k,v])=>[k,Array.isArray(v)?v.join(','):v]))});
+const state=await clerk.authenticateRequest(request,{authorizedParties:[origin]});const auth=state.toAuth();if(!auth?.userId)return fail(401,'Sign in to continue.');
+const u=await clerk.users.getUser(auth.userId);const admin=u.publicMetadata?.role==='admin';const name=[u.firstName,u.lastName].filter(Boolean).join(' ')||u.username||'Member';
+const log=async(event,details='')=>sql`INSERT INTO activity_log (user_id,name,event,details) VALUES (${u.id},${name},${event},${details})`;
+if(action==='me'&&req.method==='GET'){const attendance=await sql`SELECT activity_id,checked_at FROM attendance WHERE user_id=${u.id} ORDER BY checked_at DESC`;return res.json({attendance,admin})}
+if(action==='session'&&req.method==='POST'){const event=req.body?.event;if(!['sign_in','sign_out'].includes(event))return fail(400,'Invalid event.');await sql`INSERT INTO activity_log(user_id,name,event,details) SELECT ${u.id},${name},${event},'' WHERE NOT EXISTS (SELECT 1 FROM activity_log WHERE user_id=${u.id} AND event=${event} AND created_at>NOW()-INTERVAL '2 minutes')`;return res.json({ok:true})}
+if(action==='checkin'&&req.method==='POST'){const id=req.body?.activityId;if(typeof id!=='string'||id.length>100)return fail(400,'Invalid activity.');const rows=await sql`INSERT INTO attendance(activity_id,user_id,name) SELECT id,${u.id},${name} FROM activities WHERE id=${id} AND NOW() BETWEEN starts_at AND ends_at ON CONFLICT (activity_id,user_id) DO NOTHING RETURNING activity_id`;if(!rows.length){const existing=await sql`SELECT 1 FROM attendance WHERE activity_id=${id} AND user_id=${u.id}`;if(!existing.length)return fail(409,'Check-in is only open between the activity start and end times.')}else await log('check_in',id);return res.json({ok:true})}
+if(!admin)return fail(403,'Administrator access required.');
+if(action==='admin'&&req.method==='GET'){const [a,attendance,members,logs]=await Promise.all([sql`SELECT COUNT(*)::int AS count FROM activities`,sql`SELECT t.name,a.title,t.checked_at FROM attendance t JOIN activities a ON t.activity_id=a.id ORDER BY t.checked_at DESC`,sql`SELECT COUNT(DISTINCT user_id)::int AS count FROM activity_log`,sql`SELECT name,event,details,created_at FROM activity_log ORDER BY created_at DESC LIMIT 200`]);return res.json({activities:a[0].count,attendance,members:members[0].count,logs})}
+if(action==='create'&&req.method==='POST'){const b=req.body||{};if(typeof b.title!=='string'||!b.title.trim()||b.title.length>120||typeof b.description!=='string'||b.description.length>2000||typeof b.location!=='string'||!b.location.trim()||b.location.length>200)return fail(400,'Enter a title, description and location within the allowed lengths.');const starts=new Date(b.starts),ends=new Date(b.ends);if(!Number.isFinite(+starts)||!Number.isFinite(+ends)||ends<=starts)return fail(400,'Enter a valid start and end time.');const id=crypto.randomUUID();await sql`INSERT INTO activities(id,title,description,location,starts_at,ends_at,created_by) VALUES (${id},${b.title.trim()},${b.description.trim()},${b.location.trim()},${starts.toISOString()},${ends.toISOString()},${u.id})`;await log('activity_created',b.title.trim());return res.status(201).json({id})}
+return fail(405,'Unsupported operation.');
+}catch(e){console.error('Portal request failed:',e.name);return fail(500,'Unable to complete this request. Please try again.')}}
