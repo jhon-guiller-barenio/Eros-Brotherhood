@@ -2,19 +2,21 @@ import {createClerkClient} from '@clerk/backend';
 import {neon} from '@neondatabase/serverless';
 export default async function handler(req,res){
 res.setHeader('Cache-Control','no-store');
-const action=req.query.action;const fail=(code,error)=>res.status(code).json({error});
-if(action==='config')return res.json({publishableKey:process.env.CLERK_PUBLISHABLE_KEY||null});
-if(!process.env.CLERK_SECRET_KEY||!process.env.CLERK_PUBLISHABLE_KEY||!process.env.DATABASE_URL)return fail(503,'Member services are awaiting configuration.');
+const action=req.query.action;
+const publishableKey=process.env.CLERK_PUBLISHABLE_KEY||process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY||'pk_test_aW5mb3JtZWQtcGFuZGEtMzA0MC5jbGVyay5hY2NvdW50cy5kZXYk';const fail=(code,error)=>res.status(code).json({error});
+if(action==='config')return res.json({publishableKey});
+if(!process.env.CLERK_SECRET_KEY)return fail(503,'Sign-in is available; member records require the server authentication key.');
 try{
-const sql=neon(process.env.DATABASE_URL);
-if(action==='activities'&&req.method==='GET'){const activities=await sql`SELECT * FROM activities ORDER BY starts_at`;return res.json({activities})}
-const clerk=createClerkClient({secretKey:process.env.CLERK_SECRET_KEY,publishableKey:process.env.CLERK_PUBLISHABLE_KEY});
-const origin=process.env.APP_URL;if(!origin)return fail(503,'The application origin has not been configured.');
+const sql=process.env.DATABASE_URL?neon(process.env.DATABASE_URL):null;
+if(action==='activities'&&req.method==='GET'){if(!sql)return fail(503,'The activity database has not been connected.');const activities=await sql`SELECT * FROM activities ORDER BY starts_at`;return res.json({activities})}
+const clerk=createClerkClient({secretKey:process.env.CLERK_SECRET_KEY,publishableKey});
+const origin=process.env.APP_URL?.replace(/\/$/,'')||(process.env.VERCEL_PROJECT_PRODUCTION_URL?'https://'+process.env.VERCEL_PROJECT_PRODUCTION_URL:null);if(!origin)return fail(503,'The application origin has not been configured.');
 const url=new URL(req.url,origin);const request=new Request(url,{method:req.method,headers:new Headers(Object.entries(req.headers).filter(([,v])=>v!=null).map(([k,v])=>[k,Array.isArray(v)?v.join(','):v]))});
 const state=await clerk.authenticateRequest(request,{authorizedParties:[origin]});const auth=state.toAuth();if(!auth?.userId)return fail(401,'Sign in to continue.');
-const u=await clerk.users.getUser(auth.userId);const admin=u.publicMetadata?.role==='admin';const name=[u.firstName,u.lastName].filter(Boolean).join(' ')||u.username||'Member';
+const u=await clerk.users.getUser(auth.userId);const ownerEmails=(process.env.ADMIN_EMAILS||'').split(',').map(e=>e.trim().toLowerCase()).filter(Boolean);const admin=u.publicMetadata?.role==='admin'||u.emailAddresses.some(e=>e.verification?.status==='verified'&&ownerEmails.includes(e.emailAddress.toLowerCase()));const name=[u.firstName,u.lastName].filter(Boolean).join(' ')||u.username||'Member';
 const log=async(event,details='')=>sql`INSERT INTO activity_log (user_id,name,event,details) VALUES (${u.id},${name},${event},${details})`;
-if(action==='me'&&req.method==='GET'){const attendance=await sql`SELECT activity_id,checked_at FROM attendance WHERE user_id=${u.id} ORDER BY checked_at DESC`;return res.json({attendance,admin})}
+if(action==='me'&&req.method==='GET'){if(!sql)return res.json({attendance:[],admin,databaseReady:false});const attendance=await sql`SELECT activity_id,checked_at FROM attendance WHERE user_id=${u.id} ORDER BY checked_at DESC`;return res.json({attendance,admin,databaseReady:true})}
+if(!sql)return fail(503,'Sign-in works. Connect the attendance database to enable records and admin activities.');
 if(action==='session'&&req.method==='POST'){const event=req.body?.event;if(!['sign_in','sign_out'].includes(event))return fail(400,'Invalid event.');await sql`INSERT INTO activity_log(user_id,name,event,details) SELECT ${u.id},${name},${event},'' WHERE NOT EXISTS (SELECT 1 FROM activity_log WHERE user_id=${u.id} AND event=${event} AND created_at>NOW()-INTERVAL '2 minutes')`;return res.json({ok:true})}
 if(action==='checkin'&&req.method==='POST'){const id=req.body?.activityId;if(typeof id!=='string'||id.length>100)return fail(400,'Invalid activity.');const rows=await sql`INSERT INTO attendance(activity_id,user_id,name) SELECT id,${u.id},${name} FROM activities WHERE id=${id} AND NOW() BETWEEN starts_at AND ends_at ON CONFLICT (activity_id,user_id) DO NOTHING RETURNING activity_id`;if(!rows.length){const existing=await sql`SELECT 1 FROM attendance WHERE activity_id=${id} AND user_id=${u.id}`;if(!existing.length)return fail(409,'Check-in is only open between the activity start and end times.')}else await log('check_in',id);return res.json({ok:true})}
 if(!admin)return fail(403,'Administrator access required.');
