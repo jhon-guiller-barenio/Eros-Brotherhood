@@ -9,7 +9,7 @@ Vercel's connected account returned 403 permission errors for project creation. 
 
 ## Deploy to Vercel
 1. Import this folder into a GitHub repository and import that repository in Vercel, or run `npx vercel --prod` from this folder. Framework preset: Other; output directory: dist. The `/api/portal.js` file runs as a Vercel Node function. Install dependencies with `npm install`.
-2. Create a separate Eros application at https://dashboard.clerk.com. Enable email/password or email verification codes. Add the deployed domain as an allowed origin/redirect destination. Do not reuse another project's Clerk keys.
+2. The Eros Brotherhood Clerk development application has been created with email sign-in: app_3KqPHCpn8wTuLRKYaB0eyFGr3Xc. Its publishable key is provided in .env.example. Add its secret key through Vercel environment variables. Add the deployed domain as an allowed origin/redirect destination. Do not reuse another project's Clerk keys.
 3. Add Vercel environment variables: `CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, `DATABASE_URL` (pooled Neon PostgreSQL connection), and `APP_URL` (exact https origin of this website, without trailing slash). Secret keys remain server-side; only the Clerk publishable key is returned to the browser.
 4. Run schema.sql in the new database's SQL editor before enabling member features. Tables start empty; example gatherings are not real records.
 5. Sign up, then set that user's public metadata in the Clerk dashboard to `{ "role": "admin" }`. Only server-verified metadata grants access. The footer Admin access button opens the dashboard for administrators.
